@@ -3,6 +3,8 @@ name: Deploy Infrastructure (PR)
 on:
   pull_request:
     branches: [ main ]
+    paths:
+      - 'namespaces/**'  
 
 # Vault OIDC + repo read
 permissions:
@@ -20,13 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       namespaces: ${{ steps.detect.outputs.namespaces }}
+      has-changes: ${{ steps.detect.outputs.has-changes }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Full history for reliable diff
 
-      - name: Detect changed namespaces (PR base/head)
+      - name: Detect changed namespaces
         id: detect
         shell: bash
         run: |
@@ -37,42 +40,74 @@ jobs:
           echo "BASE=$BASE"
           echo "HEAD=$HEAD"
 
-          # Fetch just the base commit so it's present locally (no ambiguous ref)
-          git fetch --no-tags --prune --depth=1 origin "$BASE"
+          # Ensure we have both commits locally
+          echo "Fetching base and head commits..."
+          git fetch --no-tags --prune --depth=1 origin "$BASE" || {
+            echo "Failed to fetch base commit, falling back to merge-base"
+            git fetch --no-tags --prune origin main
+            BASE=$(git merge-base origin/main HEAD)
+            echo "Using merge-base: $BASE"
+          }
 
-          # Ask git to list only files under namespaces/
-          CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" -- 'namespaces/*' || true)"
-          echo "Changed files under namespaces/:"
-          printf '%s\n' "$CHANGED_FILES"
-
-          # Extract the namespace (2nd path segment) and uniq
-          mapfile -t NS < <(printf '%s\n' "$CHANGED_FILES" \
-            | awk -F'/' '/^namespaces\// && NF>2 {print $2}' \
-            | sort -u)
-
-          if ((${#NS[@]}==0)); then
+          # Get changed files under namespaces/ directory
+          echo "Detecting changed files..."
+          CHANGED_FILES=$(git diff --name-only "$BASE"..."$HEAD" -- 'namespaces/' 2>/dev/null || true)
+          
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No changes detected under namespaces/"
             echo "namespaces=[]" >> "$GITHUB_OUTPUT"
-            echo "No namespace changes detected under namespaces/."
+            echo "has-changes=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Emit compact JSON array like ["qa","backend"]
-          JSON=$(printf '%s\n' "${NS[@]}" | jq -RcS '[inputs]')
-          echo "namespaces=${JSON}" >> "$GITHUB_OUTPUT"
-          echo "Detected namespaces: ${JSON}"
+          echo "Changed files under namespaces/:"
+          echo "$CHANGED_FILES"
+
+          # Extract namespace directories (2nd path segment) and deduplicate
+          # Only include valid namespaces (must have at least one .tf file)
+          VALID_NAMESPACES=()
+          while IFS= read -r file; do
+            if [[ "$file" =~ ^namespaces/([^/]+)/ ]]; then
+              namespace="${BASH_REMATCH[1]}"
+              # Check if this namespace has .tf files
+              if ls "namespaces/$namespace"/*.tf >/dev/null 2>&1; then
+                VALID_NAMESPACES+=("$namespace")
+              else
+                echo "Warning: $namespace doesn't contain .tf files, skipping"
+              fi
+            fi
+          done <<< "$CHANGED_FILES"
+
+          # Remove duplicates and sort
+          if (( ${#VALID_NAMESPACES[@]} == 0 )); then
+            echo "No valid namespace changes detected"
+            echo "namespaces=[]" >> "$GITHUB_OUTPUT"
+            echo "has-changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Create unique sorted array
+          mapfile -t UNIQUE_NS < <(printf '%s\n' "${VALID_NAMESPACES[@]}" | sort -u)
+
+          # Generate JSON array
+          JSON=$(printf '%s\n' "${UNIQUE_NS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+          echo "namespaces=$JSON" >> "$GITHUB_OUTPUT"
+          echo "has-changes=true" >> "$GITHUB_OUTPUT"
+          echo "Detected valid namespaces: $JSON"
 
   plan:
     name: Plan (${{ matrix.namespace }})
     needs: detect-changes
-    if: needs.detect-changes.outputs.namespaces != '[]'
+    if: needs.detect-changes.outputs.has-changes == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false  # Continue with other namespaces even if one fails
       matrix:
         namespace: ${{ fromJson(needs.detect-changes.outputs.namespaces) }}
     defaults:
       run:
         working-directory: namespaces/${{ matrix.namespace }}
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,30 +116,195 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false  # Better for CI/CD pipelines
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}-${{ hashFiles('namespaces/${{ matrix.namespace }}/.terraform.lock.hcl') }}
+          restore-keys: |
+            terraform-${{ runner.os }}-
 
       - name: Get Vault Token via OIDC
         id: vault-auth
         shell: bash
         run: |
           set -euo pipefail
-          OIDC_JSON="$(curl -sLS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=vault")"
-          GITHUB_TOKEN="$(jq -r '.value' <<<"$OIDC_JSON")"
-          VAULT_TOKEN="$(curl -s -X POST \
+          
+          echo "Authenticating with Vault..."
+          
+          # Get GitHub OIDC token
+          OIDC_JSON=$(curl -sLS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=vault")
+          GITHUB_TOKEN=$(echo "$OIDC_JSON" | jq -r '.value')
+          
+          if [[ "$GITHUB_TOKEN" == "null" || -z "$GITHUB_TOKEN" ]]; then
+            echo "Failed to get OIDC token from GitHub"
+            exit 1
+          fi
+
+          # Exchange for Vault token
+          VAULT_RESPONSE=$(curl -s -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -d "{\"jwt\": \"${GITHUB_TOKEN}\", \"role\": \"github-actions\"}" \
-            "${{ env.VAULT_ADDR }}/v1/auth/jwt/login" | jq -r '.auth.client_token')"
-          echo "VAULT_TOKEN=${VAULT_TOKEN}" >> "$GITHUB_ENV"
-          echo "::add-mask::${VAULT_TOKEN}"
+            -d "{\"jwt\": \"$GITHUB_TOKEN\", \"role\": \"github-actions\"}" \
+            "$VAULT_ADDR/v1/auth/jwt/login")
+          
+          HTTP_CODE="${VAULT_RESPONSE: -3}"
+          VAULT_JSON="${VAULT_RESPONSE%???}"
+          
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "Vault authentication failed with HTTP $HTTP_CODE"
+            echo "$VAULT_JSON"
+            exit 1
+          fi
 
-      - name: Terraform fmt
-        run: terraform fmt -check -diff
+          VAULT_TOKEN=$(echo "$VAULT_JSON" | jq -r '.auth.client_token')
+          if [[ "$VAULT_TOKEN" == "null" || -z "$VAULT_TOKEN" ]]; then
+            echo "Failed to extract Vault token"
+            exit 1
+          fi
 
-      - name: Terraform validate
-        run: terraform validate
+          echo "VAULT_TOKEN=$VAULT_TOKEN" >> "$GITHUB_ENV"
+          echo "::add-mask::$VAULT_TOKEN"
+          echo "Successfully authenticated with Vault"
 
-      - name: Terraform init
-        run: terraform init -input=false
+      - name: Validate Terraform files
+        run: |
+          echo "Checking Terraform formatting..."
+          if ! terraform fmt -check -diff; then
+            echo " Terraform files are not properly formatted"
+            echo "Run 'terraform fmt -recursive' to fix formatting issues"
+            exit 1
+          fi
+          echo "Terraform formatting is correct"
 
-      - name: Terraform plan
-        run: terraform plan -input=false -no-color
+      - name: Initialize Terraform
+        run: |
+          echo "Initializing Terraform..."
+          terraform init -input=false
+          echo "Terraform initialized successfully"
+
+      - name: Validate Terraform configuration
+        run: |
+          echo "Validating Terraform configuration..."
+          terraform validate
+          echo "Terraform configuration is valid"
+
+      - name: Generate Terraform plan
+        id: plan
+        run: |
+          echo "Generating Terraform plan..."
+          terraform plan -input=false -no-color -detailed-exitcode > plan.out 2>&1 || EXIT_CODE=$?
+          
+          # Handle Terraform plan exit codes:
+          # 0 = No changes
+          # 1 = Error
+          # 2 = Changes present
+          case ${EXIT_CODE:-0} in
+            0)
+              echo "plan-result=no-changes" >> "$GITHUB_OUTPUT"
+              echo " No infrastructure changes needed"
+              ;;
+            1)
+              echo "plan-result=error" >> "$GITHUB_OUTPUT"
+              echo "Terraform plan failed"
+              cat plan.out
+              exit 1
+              ;;
+            2)
+              echo "plan-result=changes" >> "$GITHUB_OUTPUT"
+              echo "Infrastructure changes detected"
+              ;;
+          esac
+
+      - name: Comment PR with plan results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const namespace = '${{ matrix.namespace }}';
+            const planResult = '${{ steps.plan.outputs.plan-result }}';
+            
+            let comment = `## Terraform Plan Results for \`${namespace}\`\n\n`;
+            
+            if (planResult === 'no-changes') {
+              comment += '✅ No infrastructure changes needed\n';
+            } else if (planResult === 'error') {
+              comment += '❌ Terraform plan failed\n';
+            } else if (planResult === 'changes') {
+              comment += '📋 Infrastructure changes detected\n\n';
+              
+              try {
+                const plan = fs.readFileSync('namespaces/' + namespace + '/plan.out', 'utf8');
+                comment += '<details>\n<summary>Click to view plan details</summary>\n\n```hcl\n';
+                comment += plan.slice(0, 20000); // Limit size to avoid GitHub comment limits
+                if (plan.length > 20000) {
+                  comment += '\n... (truncated)\n';
+                }
+                comment += '\n```\n</details>\n';
+              } catch (error) {
+                comment += 'Could not read plan output file.\n';
+              }
+            }
+            
+            // Find existing comment for this namespace
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes(`Terraform Plan Results for \`${namespace}\``)
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+  summary:
+    name: Plan Summary
+    needs: [detect-changes, plan]
+    if: always() && needs.detect-changes.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const namespaces = ${{ needs.detect-changes.outputs.namespaces }};
+            const planJobs = Object.values(context.payload.workflow_run?.jobs || {})
+              .filter(job => job.name.startsWith('Plan ('));
+            
+            let summary = '## 📋 Terraform Plan Summary\n\n';
+            summary += `**Namespaces processed:** ${namespaces.length}\n\n`;
+            
+            if (namespaces.length === 0) {
+              summary += '✅ No namespace changes detected\n';
+            } else {
+              summary += '| Namespace | Status |\n';
+              summary += '|-----------|--------|\n';
+              
+              for (const namespace of namespaces) {
+                // This is a simplified status check - in a real scenario you'd check job results
+                summary += `| \`${namespace}\` | ⏳ Processing |\n`;
+              }
+            }
+            
+            console.log(summary);
