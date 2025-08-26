@@ -3,14 +3,14 @@ name: Deploy Infrastructure
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'namespaces/**'
-      - 'modules/**'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'namespaces/**'
-      - 'modules/**'
+
+# Vault OIDC + repo read at the workflow level
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
 
 env:
   VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
@@ -28,12 +28,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect changed namespaces
+      - name: Detect changed namespaces (only under namespaces/)
         id: detect
         shell: bash
         run: |
           set -euo pipefail
 
+          # Determine the diff range
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             BASE="origin/${{ github.base_ref }}"
             HEAD="HEAD"
@@ -42,32 +43,20 @@ jobs:
             CHANGED_FILES="$(git diff --name-only HEAD~1...HEAD)"
           fi
 
-          # If modules changed, include all namespaces
-          if echo "${CHANGED_FILES}" | grep -q '^modules/'; then
-            mapfile -t ALL_NS < <(find namespaces -mindepth 1 -maxdepth 1 -type d -printf "%f\n" | sort -u)
-            if ((${#ALL_NS[@]}==0)); then
-              echo "namespaces=[]" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            printf -v JSON '["%s"]' "$(IFS='","'; echo "${ALL_NS[*]}")"
-            echo "namespaces=${JSON}" >> "$GITHUB_OUTPUT"
-            echo "Modules changed -> all namespaces: ${JSON}"
-            exit 0
-          fi
-
-          # Only namespaces with changes
+          # Extract unique first-level dirs under namespaces/
           mapfile -t NS < <(echo "${CHANGED_FILES}" \
             | grep -E '^namespaces/[^/]+/' || true \
             | awk -F'/' '{print $2}' \
             | sort -u)
 
+          # Emit a valid JSON array (or empty array)
           if ((${#NS[@]}==0)); then
             echo "namespaces=[]" >> "$GITHUB_OUTPUT"
             echo "No namespace changes detected."
             exit 0
           fi
 
-          printf -v JSON '["%s"]' "$(IFS='","'; echo "${NS[*]}")"
+          JSON=$(printf '%s\n' "${NS[@]}" | jq -R -s 'split("\n")[:-1]')
           echo "namespaces=${JSON}" >> "$GITHUB_OUTPUT"
           echo "Detected namespaces: ${JSON}"
 
@@ -80,10 +69,9 @@ jobs:
       fail-fast: false
       matrix:
         namespace: ${{ fromJson(needs.detect-changes.outputs.namespaces) }}
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
+    defaults:
+      run:
+        working-directory: namespaces/${{ matrix.namespace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -109,85 +97,13 @@ jobs:
           echo "::add-mask::${VAULT_TOKEN}"
 
       - name: Terraform fmt
-        working-directory: namespaces/${{ matrix.namespace }}
         run: terraform fmt -check -diff
 
-      - name: Terraform init
-        working-directory: namespaces/${{ matrix.namespace }}
-        run: terraform init -input=false
-
       - name: Terraform validate
-        working-directory: namespaces/${{ matrix.namespace }}
         run: terraform validate
 
+      - name: Terraform init
+        run: terraform init 
+
       - name: Terraform plan
-        id: plan
-        working-directory: namespaces/${{ matrix.namespace }}
-        run: |
-          set -e
-          terraform plan -input=false -out=tfplan -no-color 2>&1 | tee plan_output.txt
-          {
-            echo "summary<<EOF"
-            grep -E "^[[:space:]]+([#~\-\+])" plan_output.txt || echo "No changes detected"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Upload tfplan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan-${{ matrix.namespace }}
-          path: |
-            namespaces/${{ matrix.namespace }}/tfplan
-            namespaces/${{ matrix.namespace }}/plan_output.txt
-          if-no-files-found: error
-          retention-days: 7
-
-  apply:
-    name: Apply (${{ matrix.namespace }})
-    needs: plan
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        namespace: ${{ fromJson(needs.detect-changes.outputs.namespaces) }}
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Get Vault Token via OIDC
-        id: vault-auth
-        shell: bash
-        run: |
-          set -euo pipefail
-          OIDC_JSON="$(curl -sLS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=vault")"
-          GITHUB_TOKEN="$(jq -r '.value' <<<"$OIDC_JSON")"
-          VAULT_TOKEN="$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"jwt\": \"${GITHUB_TOKEN}\", \"role\": \"github-actions\"}" \
-            "${{ env.VAULT_ADDR }}/v1/auth/jwt/login" | jq -r '.auth.client_token')"
-          echo "VAULT_TOKEN=${VAULT_TOKEN}" >> "$GITHUB_ENV"
-          echo "::add-mask::${VAULT_TOKEN}"
-
-      - name: Download tfplan artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan-${{ matrix.namespace }}
-          path: namespaces/${{ matrix.namespace }}
-
-      - name: Terraform init (ensure providers)
-        working-directory: namespaces/${{ matrix.namespace }}
-        run: terraform init -input=false
-
-      - name: Terraform apply (using saved plan)
-        working-directory: namespaces/${{ matrix.namespace }}
-        run: terraform apply -input=false -auto-approve tfplan
+        run: terraform plan 
