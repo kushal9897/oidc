@@ -1,12 +1,10 @@
-name: Deploy Infrastructure
+name: Deploy Infrastructure (PR)
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
 
-# Vault OIDC + repo read at the workflow level
+# Vault OIDC + repo read
 permissions:
   id-token: write
   contents: read
@@ -28,22 +26,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect changed namespaces (only under namespaces/)
+      - name: Detect changed namespaces (PR base/head)
         id: detect
         shell: bash
         run: |
           set -euo pipefail
 
-          # Find changed files
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE="origin/${{ github.base_ref }}"
-            HEAD="HEAD"
-            CHANGED_FILES="$(git diff --name-only "${BASE}...${HEAD}")"
-          else
-            CHANGED_FILES="$(git diff --name-only HEAD~1...HEAD)"
-          fi
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          echo "BASE=$BASE"
+          echo "HEAD=$HEAD"
 
-          # Keep only files under namespaces/, map to the 2nd segment (= namespace), uniq
+          # Ensure BASE exists locally (important for PRs)
+          git fetch --no-tags --prune --depth=1 origin "+$BASE:$BASE" || true
+
+          # Files changed in the PR
+          CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" || true)"
+          echo "Changed files:"
+          printf '%s\n' "$CHANGED_FILES"
+
+          # namespaces/<ns>/...
           mapfile -t NS < <(printf '%s\n' "$CHANGED_FILES" \
             | grep -E '^namespaces/[^/]+/' || true \
             | cut -d'/' -f2 \
@@ -51,14 +53,12 @@ jobs:
 
           if ((${#NS[@]}==0)); then
             echo "namespaces=[]" >> "$GITHUB_OUTPUT"
-            echo "No namespace changes detected."
+            echo "No namespace changes detected under namespaces/."
             exit 0
           fi
 
-          # Build compact single-line JSON array like ["qa","backend"]
+          # Emit compact JSON array like ["qa","backend"]
           JSON=$(printf '%s\n' "${NS[@]}" | jq -RcS '[inputs]')
-
-          # IMPORTANT: write as a single line (no extra whitespace/newlines)
           echo "namespaces=${JSON}" >> "$GITHUB_OUTPUT"
           echo "Detected namespaces: ${JSON}"
 
@@ -105,7 +105,7 @@ jobs:
         run: terraform validate
 
       - name: Terraform init
-        run: terraform init 
+        run: terraform init -input=false
 
       - name: Terraform plan
-        run: terraform plan 
+        run: terraform plan -input=false -no-color
