@@ -47,7 +47,7 @@ jobs:
 
           # Extract the namespace (2nd path segment) and uniq
           mapfile -t NS < <(printf '%s\n' "$CHANGED_FILES" \
-            | awk -F'/' 'NF>2 {print $2}' \
+            | awk -F'/' '/^namespaces\// && NF>2 {print $2}' \
             | sort -u)
 
           if ((${#NS[@]}==0)); then
