@@ -1,0 +1,218 @@
+name: "Vault CI/CD Pipeline"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'evviroments/**'
+      - 'modules/**'
+
+env:
+  TF_VERSION: "1.6.6"
+  VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+
+jobs:
+  detect-changes:
+    name: "Detect Changes"
+    runs-on: ubuntu-latest
+    outputs:
+      qa: ${{ steps.changes.outputs.qa }}
+      data: ${{ steps.changes.outputs.data }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes
+        id: changes
+        run: |
+          # Function to check for changes
+          check_changes() {
+            local path=$1
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^$path" && echo "true" || echo "false"
+            else
+              git diff --name-only HEAD~1...HEAD | grep -q "^$path" && echo "true" || echo "false"
+            fi
+          }
+          
+          # Check for changes in each environment
+          QA_CHANGED=$(check_changes "evviroments/qa/")
+          DATA_CHANGED=$(check_changes "evviroments/data/")
+          MODULES_CHANGED=$(check_changes "modules/")
+          
+          # If modules changed, deploy all environments
+          if [ "$MODULES_CHANGED" == "true" ]; then
+            echo "qa=true" >> $GITHUB_OUTPUT
+            echo "data=true" >> $GITHUB_OUTPUT
+          else
+            echo "qa=$QA_CHANGED" >> $GITHUB_OUTPUT
+            echo "data=$DATA_CHANGED" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-qa:
+    name: Deploy QA Environment
+    needs: detect-changes
+    if: needs.detect-changes.outputs.qa == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Get Vault Token via OIDC
+        id: vault-auth
+        run: |
+          # Get JWT token from GitHub
+          GITHUB_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=vault" | jq -r '.value')
+          
+          # Determine role based on event
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            VAULT_ROLE="github-actions-pr"
+          else
+            VAULT_ROLE="github-actions"
+          fi
+          
+          # Authenticate to Vault
+          VAULT_RESPONSE=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"jwt\": \"$GITHUB_TOKEN\", \"role\": \"$VAULT_ROLE\"}" \
+            $VAULT_ADDR/v1/auth/jwt/login)
+          
+          VAULT_TOKEN=$(echo $VAULT_RESPONSE | jq -r '.auth.client_token')
+          echo "::add-mask::$VAULT_TOKEN"
+          echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
+
+      - name: Get AWS Credentials from Vault
+        id: aws-creds
+        run: |
+          # Get AWS credentials from Vault
+          AWS_CREDS=$(curl -H "X-Vault-Token: $VAULT_TOKEN" \
+            -X GET $VAULT_ADDR/v1/aws/creds/deploy-role)
+          
+          # Export AWS credentials
+          echo "AWS_ACCESS_KEY_ID=$(echo $AWS_CREDS | jq -r '.data.access_key')" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$(echo $AWS_CREDS | jq -r '.data.secret_key')" >> $GITHUB_ENV
+          echo "::add-mask::$(echo $AWS_CREDS | jq -r '.data.access_key')"
+          echo "::add-mask::$(echo $AWS_CREDS | jq -r '.data.secret_key')"
+
+      - name: Terraform Init
+        working-directory: evviroments/qa
+        run: terraform init
+
+      - name: Terraform Validate
+        working-directory: evviroments/qa
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: evviroments/qa
+        run: |
+          terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt
+
+      - name: Comment PR - QA Plan
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('evviroments/qa/plan_output.txt', 'utf8');
+            const output = `### 🚀 Terraform QA Plan
+            
+            <details><summary>Click to expand</summary>
+            
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+            
+            </details>
+            
+            *Triggered by @${{ github.actor }}*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        working-directory: evviroments/qa
+        run: terraform apply -auto-approve
+
+  terraform-data:
+    name: "Deploy Data Environment"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.data == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Get Vault Token via OIDC
+        id: vault-auth
+        run: |
+          # Get JWT token from GitHub
+          GITHUB_TOKEN=$(curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=vault" | jq -r '.value')
+          
+          # Authenticate to Vault
+          VAULT_RESPONSE=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"jwt\": \"$GITHUB_TOKEN\", \"role\": \"github-actions\"}" \
+            $VAULT_ADDR/v1/auth/jwt/login)
+          
+          VAULT_TOKEN=$(echo $VAULT_RESPONSE | jq -r '.auth.client_token')
+          echo "::add-mask::$VAULT_TOKEN"
+          echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
+
+      - name: Get AWS Credentials from Vault
+        id: aws-creds
+        run: |
+          # Get AWS credentials from Vault
+          AWS_CREDS=$(curl -H "X-Vault-Token: $VAULT_TOKEN" \
+            -X GET $VAULT_ADDR/v1/aws/creds/deploy-role)
+          
+          # Export AWS credentials
+          echo "AWS_ACCESS_KEY_ID=$(echo $AWS_CREDS | jq -r '.data.access_key')" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$(echo $AWS_CREDS | jq -r '.data.secret_key')" >> $GITHUB_ENV
+          echo "::add-mask::$(echo $AWS_CREDS | jq -r '.data.access_key')"
+          echo "::add-mask::$(echo $AWS_CREDS | jq -r '.data.secret_key')"
+
+      - name: Terraform Init
+        working-directory: evviroments/data
+        run: terraform init
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: evviroments/data
+        run: |
+          terraform plan -out=tfplan -no-color 2>&1 | tee plan_output.txt
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        working-directory: evviroments/data
+        run: terraform apply -auto-approve

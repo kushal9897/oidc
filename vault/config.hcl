@@ -1,31 +1,30 @@
-# Vault server configuration with persistent storage
-# This uses integrated storage (Raft) for data persistence
+# Vault Server Configuration with Persistent Storage
 
-# API listener configuration
-listener "tcp" {
-  address     = "127.0.0.1:8200"
-  tls_disable = true  # Only for local development - use TLS in production
-}
-
-# Storage backend - Raft for persistence
+# Storage backend using integrated Raft storage
 storage "raft" {
   path    = "./vault-data"
-  node_id = "node1"
+  node_id = "vault-node-1"
 }
 
-# API address for CLI access
-api_addr = "http://127.0.0.1:8200"
+# HTTP listener
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = true  # Only for development - use TLS in production
+}
+
+# API and cluster addresses
+api_addr     = "http://127.0.0.1:8200"
 cluster_addr = "http://127.0.0.1:8201"
 
-# UI configuration
+# Enable UI
 ui = true
+
+# Disable mlock for development
+disable_mlock = true
 
 # Logging
 log_level = "info"
 
-# Disable mlock for development (enable in production)
-disable_mlock = true
-
-# Default and max lease TTLs
+# Default lease TTLs
 default_lease_ttl = "15m"
-max_lease_ttl = "1h"
+max_lease_ttl     = "1h"
