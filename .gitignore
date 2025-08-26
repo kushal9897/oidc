@@ -1,45 +1,35 @@
-# Terraform
+# Local .terraform directories
+**/.terraform/*
+**/.terraform/*/**
+
+# Exclude all terraform lock dirs except the lock file
+!.terraform.lock.hcl
+
+# Terraform state files
 *.tfstate
 *.tfstate.*
-*.tfplan
-.terraform/
-.terraform.lock.hcl
+*.tfstate.backup
+
+# Crash logs
 crash.log
+crash.*.log
+
+# Sensitive variable files
+*.tfvars
+*.tfvars.json
+
+# Plan files
+*.tfplan
+
+# Local override files
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-.terraformrc
-terraform.rc
 
-# Vault
-vault-data/
-vault-keys.json
-*.pid
-.vault-token
+# Provider binaries (sometimes left behind)
+terraform-provider-*
 
-# Environment
-.env
-.env.*
-*.env
-
-# AWS
-.aws/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Ignore .DS_Store, Thumbs.db, and other OS cruft
 .DS_Store
-
-# Logs
-*.log
-
-# Generated files
-*.generated
-backend.tf
-
-# Temporary
-*.tmp
-*.bak
+Thumbs.db

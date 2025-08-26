@@ -1,12 +1,9 @@
-# Bootstrap configuration - Run this first to set up AWS backend and Vault OIDC
+# Bootstrap configuration - Sets up Vault and initial AWS resources
+
 terraform {
   required_version = ">= 1.6.0"
   
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
     vault = {
       source  = "hashicorp/vault"
       version = "~> 3.20"
@@ -14,171 +11,94 @@ terraform {
   }
 }
 
-# Data source for current AWS account
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
-# Generate unique bucket name
-locals {
-  account_id = data.aws_caller_identity.current.account_id
-  region     = data.aws_region.current.name
-  project_name = var.project_name
-  
-  bucket_name = "terraform-state-${local.account_id}-${local.region}"
-  
-  common_tags = {
-    Project     = local.project_name
-    ManagedBy   = "Terraform"
-    Environment = "Bootstrap"
-    Purpose     = "Infrastructure State Management"
-  }
+provider "vault" {
+  # Configured via environment variables (VAULT_ADDR, VAULT_TOKEN)
 }
 
-# Create S3 bucket for Terraform state
-module "terraform_backend" {
-  source = "../modules/aws-backend"
+# Enable + configure AWS secrets engine
+resource "vault_aws_secret_backend" "aws" {
+  path   = "aws"
+  region = var.aws_region
   
-  bucket_name    = local.bucket_name
-  dynamodb_table = "terraform-state-lock"
-  tags          = local.common_tags
+  access_key = var.aws_access_key_id
+  secret_key = var.aws_secret_access_key
+  
+  default_lease_ttl_seconds = 900   # 15 minutes
+  max_lease_ttl_seconds     = 1800  # 30 minutes
 }
 
-# Configure Vault OIDC
-module "vault_oidc" {
-  source = "../modules/vault-oidc"
-  
-  github_org        = var.github_org
-  github_repo       = var.github_repo
-  aws_account_id    = local.account_id
-  aws_region        = local.region
-  project_name      = local.project_name
-  vault_addr        = var.vault_addr
-}
+# Create Terraform role in Vault (works with root creds)
+resource "vault_aws_secret_backend_role" "terraform" {
+  backend         = vault_aws_secret_backend.aws.path
+  name            = "terraform-role"
+  credential_type = "iam_user"
 
-# Create IAM role for Vault to assume
-resource "aws_iam_role" "vault_aws_secrets_role" {
-  name = "${local.project_name}-vault-secrets-role"
-  
-  assume_role_policy = jsonencode({
+  policy_document = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${local.account_id}:root"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-  
-  tags = local.common_tags
-}
-
-# Attach policies to Vault role
-resource "aws_iam_role_policy_attachment" "vault_iam_full" {
-  role       = aws_iam_role.vault_aws_secrets_role.name
-  policy_arn = "arn:aws:iam::aws:policy/IAMFullAccess"
-}
-
-resource "aws_iam_role_policy_attachment" "vault_sts_full" {
-  role       = aws_iam_role.vault_aws_secrets_role.name
-  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
-}
-
-# Create IAM role for deployments
-resource "aws_iam_role" "deployment_role" {
-  name = "${local.project_name}-deployment-role"
-  
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${local.account_id}:root"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-  
-  tags = local.common_tags
-}
-
-# Create deployment policy
-resource "aws_iam_policy" "deployment_policy" {
-  name = "${local.project_name}-deployment-policy"
-  
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "EC2Permissions"
-        Effect = "Allow"
-        Action = [
-          "ec2:*"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "S3Permissions"
-        Effect = "Allow"
-        Action = [
-          "s3:*"
-        ]
-        Resource = [
-          "arn:aws:s3:::${local.project_name}-*",
-          "arn:aws:s3:::${local.project_name}-*/*",
-          "arn:aws:s3:::${local.bucket_name}",
-          "arn:aws:s3:::${local.bucket_name}/*"
-        ]
-      },
-      {
-        Sid    = "IAMReadPermissions"
-        Effect = "Allow"
-        Action = [
+        Effect   = "Allow"
+        Action   = [
+          "ec2:*",
+          "s3:*",
+          "iam:GetUser",
           "iam:GetRole",
-          "iam:GetPolicy",
-          "iam:ListRoles",
-          "iam:ListPolicies",
           "sts:GetCallerIdentity"
         ]
         Resource = "*"
-      },
-      {
-        Sid    = "DynamoDBStateLock"
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:DescribeTable"
-        ]
-        Resource = "arn:aws:dynamodb:${local.region}:${local.account_id}:table/terraform-state-lock"
       }
     ]
   })
-  
-  tags = local.common_tags
 }
 
-# Attach policy to deployment role
-resource "aws_iam_role_policy_attachment" "deployment_policy_attach" {
-  role       = aws_iam_role.deployment_role.name
-  policy_arn = aws_iam_policy.deployment_policy.arn
+# Enable JWT auth for GitHub Actions
+resource "vault_jwt_auth_backend" "github" {
+  description        = "JWT auth for GitHub Actions"
+  path               = "jwt"
+  oidc_discovery_url = "https://token.actions.githubusercontent.com"
+  bound_issuer       = "https://token.actions.githubusercontent.com"
 }
 
-# Generate backend configuration files for environments
-resource "local_file" "backend_config" {
-  for_each = toset(["qa", "production"])
+# Create role for GitHub Actions
+resource "vault_jwt_auth_backend_role" "github_actions" {
+  backend   = vault_jwt_auth_backend.github.path
+  role_name = "github-actions"
   
-  content = templatefile("${path.module}/templates/backend.tf.tpl", {
-    bucket         = local.bucket_name
-    key           = "${local.project_name}/${each.key}/terraform.tfstate"
-    region        = local.region
-    dynamodb_table = "terraform-state-lock"
-  })
+  token_policies = ["terraform-policy"]
   
-  filename = "${path.module}/../environments/${each.key}/backend.tf.generated"
+  bound_audiences = ["https://github.com/${var.github_org}", "vault"]
+  bound_subject   = "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main"
+  
+  user_claim = "actor"
+  role_type  = "jwt"
+  token_ttl  = 900
+}
+
+# Create policy for Terraform
+resource "vault_policy" "terraform" {
+  name = "terraform-policy"
+  
+  policy = <<EOT
+# Read AWS credentials
+path "aws/creds/terraform-role" {
+  capabilities = ["read"]
+}
+
+# Token renewal
+path "auth/token/renew-self" {
+  capabilities = ["update"]
+}
+
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+EOT
+}
+
+output "vault_aws_path" {
+  value = vault_aws_secret_backend.aws.path
+}
+
+output "vault_role_name" {
+  value = vault_aws_secret_backend_role.terraform.name
 }

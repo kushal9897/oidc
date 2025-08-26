@@ -1,25 +1,23 @@
 #!/bin/bash
-set -e
 
 echo "Starting Vault server..."
-
-# Check if vault-data directory exists
-if [ ! -d "vault-data" ]; then
-    mkdir -p vault-data
-    echo "Created vault-data directory"
-fi
-
-# Start Vault in background
 vault server -config=vault/config.hcl &
 VAULT_PID=$!
 
 echo "Vault started with PID: $VAULT_PID"
-echo "Vault PID: $VAULT_PID" > vault.pid
+echo $VAULT_PID > vault.pid
 
-# Wait for Vault to start
 sleep 5
 
-# Run setup script
-./vault/setup.sh
+export VAULT_ADDR='http://127.0.0.1:8200'
 
-echo "Vault is ready at http://127.0.0.1:8200"
+# Unseal if needed
+if [ -f "vault/vault-keys.json" ]; then
+    for i in {0..2}; do
+        KEY=$(jq -r ".unseal_keys_b64[$i]" vault/vault-keys.json)
+        vault operator unseal $KEY
+    done
+    echo "✅ Vault unsealed"
+fi
+
+echo "✅ Vault is ready at $VAULT_ADDR"

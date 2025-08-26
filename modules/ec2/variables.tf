@@ -1,10 +1,10 @@
 variable "name" {
-  description = "Name of the EC2 instance"
+  description = "Name for the EC2 instance and related resources"
   type        = string
 }
 
 variable "environment" {
-  description = "Environment name"
+  description = "Environment name (qa, backend, production)"
   type        = string
 }
 
@@ -15,37 +15,19 @@ variable "instance_type" {
 }
 
 variable "ami_id" {
-  description = "AMI ID (optional - will use latest Amazon Linux 2 if not specified)"
+  description = "Specific AMI ID (optional - uses latest Amazon Linux 2 if not specified)"
   type        = string
   default     = ""
-}
-
-variable "subnet_id" {
-  description = "Subnet ID (optional - will use default if not specified)"
-  type        = string
-  default     = ""
-}
-
-variable "security_group_ids" {
-  description = "List of security group IDs"
-  type        = list(string)
-  default     = []
 }
 
 variable "root_volume_size" {
-  description = "Root volume size in GB"
+  description = "Size of root volume in GB"
   type        = number
   default     = 20
 }
 
-variable "user_data" {
-  description = "User data script"
-  type        = string
-  default     = ""
-}
-
 variable "tags" {
-  description = "Additional tags"
+  description = "Additional tags to apply to resources"
   type        = map(string)
   default     = {}
 }
