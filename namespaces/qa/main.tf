@@ -27,7 +27,7 @@ module "vault_aws" {
 module "ec2_instance" {
   source = "../../modules/ec2"
   
-  name          = "test12"
+  name          = "test"
   environment   = local.environment
   instance_type = var.instance_type
   
