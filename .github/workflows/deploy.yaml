@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Determine the diff range
+          # Find changed files
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             BASE="origin/${{ github.base_ref }}"
             HEAD="HEAD"
@@ -43,20 +43,22 @@ jobs:
             CHANGED_FILES="$(git diff --name-only HEAD~1...HEAD)"
           fi
 
-          # Extract unique first-level dirs under namespaces/
-          mapfile -t NS < <(echo "${CHANGED_FILES}" \
+          # Keep only files under namespaces/, map to the 2nd segment (= namespace), uniq
+          mapfile -t NS < <(printf '%s\n' "$CHANGED_FILES" \
             | grep -E '^namespaces/[^/]+/' || true \
-            | awk -F'/' '{print $2}' \
+            | cut -d'/' -f2 \
             | sort -u)
 
-          # Emit a valid JSON array (or empty array)
           if ((${#NS[@]}==0)); then
             echo "namespaces=[]" >> "$GITHUB_OUTPUT"
             echo "No namespace changes detected."
             exit 0
           fi
 
-          JSON=$(printf '%s\n' "${NS[@]}" | jq -R -s 'split("\n")[:-1]')
+          # Build compact single-line JSON array like ["qa","backend"]
+          JSON=$(printf '%s\n' "${NS[@]}" | jq -RcS '[inputs]')
+
+          # IMPORTANT: write as a single line (no extra whitespace/newlines)
           echo "namespaces=${JSON}" >> "$GITHUB_OUTPUT"
           echo "Detected namespaces: ${JSON}"
 
