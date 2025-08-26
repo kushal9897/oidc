@@ -37,18 +37,17 @@ jobs:
           echo "BASE=$BASE"
           echo "HEAD=$HEAD"
 
-          # Ensure BASE exists locally (important for PRs)
-          git fetch --no-tags --prune --depth=1 origin "+$BASE:$BASE" || true
+          # Fetch just the base commit so it's present locally (no ambiguous ref)
+          git fetch --no-tags --prune --depth=1 origin "$BASE"
 
-          # Files changed in the PR
-          CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" || true)"
-          echo "Changed files:"
+          # Ask git to list only files under namespaces/
+          CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" -- 'namespaces/*' || true)"
+          echo "Changed files under namespaces/:"
           printf '%s\n' "$CHANGED_FILES"
 
-          # namespaces/<ns>/...
+          # Extract the namespace (2nd path segment) and uniq
           mapfile -t NS < <(printf '%s\n' "$CHANGED_FILES" \
-            | grep -E '^namespaces/[^/]+/' || true \
-            | cut -d'/' -f2 \
+            | awk -F'/' 'NF>2 {print $2}' \
             | sort -u)
 
           if ((${#NS[@]}==0)); then
