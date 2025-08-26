@@ -231,11 +231,11 @@ jobs:
             let comment = `## Terraform Plan Results for \`${namespace}\`\n\n`;
             
             if (planResult === 'no-changes') {
-              comment += '✅ No infrastructure changes needed\n';
+              comment += ' No infrastructure changes needed\n';
             } else if (planResult === 'error') {
-              comment += '❌ Terraform plan failed\n';
+              comment += ' Terraform plan failed\n';
             } else if (planResult === 'changes') {
-              comment += '📋 Infrastructure changes detected\n\n';
+              comment += ' Infrastructure changes detected\n\n';
               
               try {
                 const plan = fs.readFileSync('namespaces/' + namespace + '/plan.out', 'utf8');
@@ -292,19 +292,22 @@ jobs:
             const planJobs = Object.values(context.payload.workflow_run?.jobs || {})
               .filter(job => job.name.startsWith('Plan ('));
             
-            let summary = '## 📋 Terraform Plan Summary\n\n';
+            let summary = '##  Terraform Plan Summary\n\n';
             summary += `**Namespaces processed:** ${namespaces.length}\n\n`;
             
             if (namespaces.length === 0) {
-              summary += '✅ No namespace changes detected\n';
+              summary += ' No namespace changes detected\n';
             } else {
               summary += '| Namespace | Status |\n';
               summary += '|-----------|--------|\n';
               
               for (const namespace of namespaces) {
                 // This is a simplified status check - in a real scenario you'd check job results
-                summary += `| \`${namespace}\` | ⏳ Processing |\n`;
+                summary += `| \`${namespace}\` | Processing |\n`;
               }
             }
             
             console.log(summary);
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
