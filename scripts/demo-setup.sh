@@ -102,8 +102,10 @@ setup_aws_secrets_engine() {
         print_warning "AWS secrets engine may already be enabled"
     }
     
-    # Configure AWS secrets engine
+    # Configure AWS secrets engine with actual credentials
     vault write aws/config/root \
+        access_key=$AWS_ACCESS_KEY_ID \
+        secret_key=$AWS_SECRET_ACCESS_KEY \
         region=$AWS_REGION \
         max_retries=3 || {
         print_warning "AWS root config may already exist"
@@ -175,46 +177,34 @@ setup_jwt_auth() {
         bound_issuer="https://token.actions.githubusercontent.com" \
         oidc_discovery_url="https://token.actions.githubusercontent.com"
     
-    # Create GitHub Actions role for QA
+    # Create GitHub Actions role for QA (using inline JSON)
     vault write auth/jwt/role/github-actions \
         bound_audiences="https://github.com/$GITHUB_ORG,vault" \
-        bound_claims=@- \
+        bound_claims="sub=repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main" \
         user_claim="actor" \
         role_type="jwt" \
         token_policies="github-actions" \
         token_ttl=900 \
-        token_max_ttl=1800 <<EOF
-{
-  "sub": "repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main"
-}
-EOF
+        token_max_ttl=1800
     
     # Create GitHub Actions role for Data environment
     vault write auth/jwt/role/github-actions-data \
         bound_audiences="https://github.com/$GITHUB_ORG,vault" \
-        bound_claims=@- \
+        bound_claims="sub=repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main" \
         user_claim="actor" \
         role_type="jwt" \
         token_policies="github-actions-data" \
         token_ttl=600 \
-        token_max_ttl=900 <<EOF
-{
-  "sub": "repo:$GITHUB_ORG/$GITHUB_REPO:ref:refs/heads/main"
-}
-EOF
+        token_max_ttl=900
     
     # Create GitHub Actions role for PRs (read-only)
     vault write auth/jwt/role/github-actions-pr \
         bound_audiences="https://github.com/$GITHUB_ORG,vault" \
-        bound_claims=@- \
+        bound_claims="sub=repo:$GITHUB_ORG/$GITHUB_REPO:pull_request" \
         user_claim="actor" \
         role_type="jwt" \
         token_policies="github-actions-readonly" \
-        token_ttl=900 <<EOF
-{
-  "sub": "repo:$GITHUB_ORG/$GITHUB_REPO:pull_request"
-}
-EOF
+        token_ttl=900
     
     print_success "JWT auth method configured"
 }
@@ -222,7 +212,7 @@ EOF
 # Setup policies
 setup_policies() {
     print_step "Setting up Vault policies..."
-    
+{{ ... }}
     # GitHub Actions policy (QA environment)
     vault policy write github-actions - <<EOF
 # Read AWS credentials
