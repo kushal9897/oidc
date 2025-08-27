@@ -67,7 +67,7 @@ resource "vault_jwt_auth_backend_role" "github_actions" {
   token_policies = ["terraform-policy"]
   
   bound_audiences = ["https://github.com/${var.github_org}", "vault"]
-  bound_subject   = "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main"
+  bound_subject   = "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/*"
   
   user_claim = "actor"
   role_type  = "jwt"
