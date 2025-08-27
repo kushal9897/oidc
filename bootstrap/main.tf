@@ -61,17 +61,23 @@ resource "vault_jwt_auth_backend" "github" {
 
 # Create role for GitHub Actions
 resource "vault_jwt_auth_backend_role" "github_actions" {
-  backend   = vault_jwt_auth_backend.github.path
-  role_name = "github-actions"
-  
-  token_policies = ["terraform-policy"]
-  
-  bound_audiences = ["https://github.com/${var.github_org}", "vault"]
-  bound_subject   = "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/*"
-  
-  user_claim = "actor"
-  role_type  = "jwt"
-  token_ttl  = 900
+  backend         = vault_jwt_auth_backend.github.path
+  role_name       = "github-actions"
+
+  token_policies  = ["terraform-policy"]
+  role_type       = "jwt"
+  user_claim      = "actor"
+  token_ttl       = 900
+
+  bound_audiences = ["vault", "https://github.com/${var.github_org}"]
+
+  # Accept both push and PR subjects
+  bound_subject   = "repo:${var.github_org}/${var.github_repo}:*"
+
+  # Constrain to your repo (and optionally limit events)
+  bound_claims = {
+    repository = "${var.github_org}/${var.github_repo}"
+  }
 }
 
 # Create policy for Terraform
