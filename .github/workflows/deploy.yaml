@@ -15,6 +15,8 @@ permissions:
 env:
   VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
   TF_VERSION: "1.6.0"
+  VAULT_ROLE: github-actions       # store in secrets or env as you prefer
+  VAULT_NAMESPACE: admin   
 
 jobs:
   detect-changes:
@@ -126,36 +128,85 @@ jobs:
           restore-keys: |
             terraform-${{ runner.os }}-
 
-      - name: Get Vault Token via OIDC
-        id: vault-auth
-        shell: bash
-        run: |
-           echo "Requesting GitHub OIDC token for Vault authentication"
-           export JWT_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://github.com/test-repo" | jq -r '.value')
+      - name: Get Vault Token via GitHub OIDC
+  id: vault-auth
+  if: github.event.pull_request.head.repo.full_name == github.repository  # skip forks (no OIDC)
+  shell: bash
+  run: |
+    set -euo pipefail
 
-           echo "Authenticating with Vault using OIDC"
-           VAULT_ADDR="${{ inputs.vault-addr }}"
-           VAULT_ROLE="${{ inputs.vault-role }}"
-           VAULT_NAMESPACE="admin"
+    # Sanity check: OIDC context exists
+    if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+      echo "OIDC context not available (likely a forked PR or missing permissions)."
+      exit 0
+    fi
 
-           RESPONSE=$(curl -sSL --request POST \
-             --header "X-Vault-Namespace: $VAULT_NAMESPACE" \
-             --data "{\"jwt\": \"${JWT_TOKEN}\", \"role\": \"${VAULT_ROLE}\"}" \
-             $VAULT_ADDR/v1/auth/jwt/login)
+    # Your role allows either "vault" or "https://github.com/kushal9897" as audience.
+    # Try "vault" first (simplest), then fall back to the GitHub URL if needed.
+    get_jwt() {
+      local aud="$1"
+      curl -sSL \
+        -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${aud}" | jq -r '.value'
+    }
 
-            export VAULT_TOKEN=$(echo "$RESPONSE" | jq -r '.auth.client_token')
-            if [ "$VAULT_TOKEN" == "null" ] || [ -z "$VAULT_TOKEN" ]; then
-             echo "Vault authentication failed"
-             echo "$RESPONSE"
-             exit 1
-            fi
+    echo "Requesting GitHub OIDC token (audience=vault)"
+    JWT_TOKEN="$(get_jwt "vault")"
+    if [[ -z "$JWT_TOKEN" || "$JWT_TOKEN" == "null" ]]; then
+      echo "Retrying with audience=https://github.com/kushal9897"
+      JWT_TOKEN="$(get_jwt "https://github.com/kushal9897")"
+    fi
 
-            echo "Vault authentication successful"
-            echo "::add-mask::$VAULT_TOKEN"
-            echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
-            echo "VAULT_ADDR=$VAULT_ADDR" >> $GITHUB_ENV
+    if [[ -z "$JWT_TOKEN" || "$JWT_TOKEN" == "null" ]]; then
+      echo "Failed to obtain OIDC token"
+      exit 1
+    fi
 
+    # Optional: Verify claims match your role before calling Vault
+    # Your role bound_subject: repo:kushal9897/oidc:ref:refs/heads/*
+    IFS='.' read -r _ payload _ <<< "$JWT_TOKEN" || true
+    if decoded=$(echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null); then
+      sub=$(echo "$decoded" | jq -r '.sub // empty')
+      aud=$(echo "$decoded" | jq -cr '.aud // empty')
+      echo "OIDC sub: $sub"
+      echo "OIDC aud: $aud"
+      case "$sub" in
+        repo:kushal9897/oidc:ref:refs/heads/*) ;;  # OK
+        *)
+          echo "JWT 'sub' does not match bound_subject (repo:kushal9897/oidc:ref:refs/heads/*)"; 
+          echo "Ref/branch or repository may not match role constraints."
+          exit 1
+          ;;
+      esac
+    else
+      echo "Warning: could not decode JWT claims for local validation (continuing)."
+    fi
+
+    : "${VAULT_ADDR:?VAULT_ADDR is required}"
+    : "${VAULT_ROLE:?VAULT_ROLE is required}"
+    VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
+
+    echo "Authenticating with Vault (role=${VAULT_ROLE}, ns=${VAULT_NAMESPACE})"
+    RESPONSE="$(curl -sSL --request POST \
+      --header "X-Vault-Namespace: ${VAULT_NAMESPACE}" \
+      --header "Content-Type: application/json" \
+      --data "{\"jwt\": \"${JWT_TOKEN}\", \"role\": \"${VAULT_ROLE}\"}" \
+      "${VAULT_ADDR}/v1/auth/jwt/login")"
+
+    VAULT_TOKEN="$(echo "$RESPONSE" | jq -r '.auth.client_token')"
+    if [[ -z "$VAULT_TOKEN" || "$VAULT_TOKEN" == "null" ]]; then
+      echo "Vault authentication failed"
+      echo "$RESPONSE"
+      exit 1
+    fi
+
+    echo "Vault authentication successful"
+    echo "::add-mask::$VAULT_TOKEN"
+    {
+      echo "VAULT_TOKEN=$VAULT_TOKEN"
+      echo "VAULT_ADDR=$VAULT_ADDR"
+      echo "VAULT_NAMESPACE=$VAULT_NAMESPACE"
+    } >> "$GITHUB_ENV"
       - name: Validate Terraform files
         run: |
           echo "Checking Terraform formatting..."
