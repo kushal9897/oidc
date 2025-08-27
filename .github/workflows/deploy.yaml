@@ -130,45 +130,31 @@ jobs:
         id: vault-auth
         shell: bash
         run: |
-          set -euo pipefail
-          
-          echo "Authenticating with Vault..."
-          
-          # Get GitHub OIDC token
-          OIDC_JSON=$(curl -sLS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=vault")
-          GITHUB_TOKEN=$(echo "$OIDC_JSON" | jq -r '.value')
-          
-          if [[ "$GITHUB_TOKEN" == "null" || -z "$GITHUB_TOKEN" ]]; then
-            echo "Failed to get OIDC token from GitHub"
-            exit 1
-          fi
+           echo "Requesting GitHub OIDC token for Vault authentication"
+           export JWT_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://github.com/test-repo" | jq -r '.value')
 
-          # Exchange for Vault token
-          VAULT_RESPONSE=$(curl -s -w "%{http_code}" -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"jwt\": \"$GITHUB_TOKEN\", \"role\": \"github-actions\"}" \
-            "$VAULT_ADDR/v1/auth/jwt/login")
-          
-          HTTP_CODE="${VAULT_RESPONSE: -3}"
-          VAULT_JSON="${VAULT_RESPONSE%???}"
-          
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "Vault authentication failed with HTTP $HTTP_CODE"
-            echo "$VAULT_JSON"
-            exit 1
-          fi
+           echo "Authenticating with Vault using OIDC"
+           VAULT_ADDR="${{ inputs.vault-addr }}"
+           VAULT_ROLE="${{ inputs.vault-role }}"
+           VAULT_NAMESPACE="admin"
 
-          VAULT_TOKEN=$(echo "$VAULT_JSON" | jq -r '.auth.client_token')
-          if [[ "$VAULT_TOKEN" == "null" || -z "$VAULT_TOKEN" ]]; then
-            echo "Failed to extract Vault token"
-            exit 1
-          fi
+           RESPONSE=$(curl -sSL --request POST \
+             --header "X-Vault-Namespace: $VAULT_NAMESPACE" \
+             --data "{\"jwt\": \"${JWT_TOKEN}\", \"role\": \"${VAULT_ROLE}\"}" \
+             $VAULT_ADDR/v1/auth/jwt/login)
 
-          echo "VAULT_TOKEN=$VAULT_TOKEN" >> "$GITHUB_ENV"
-          echo "::add-mask::$VAULT_TOKEN"
-          echo "Successfully authenticated with Vault"
+            export VAULT_TOKEN=$(echo "$RESPONSE" | jq -r '.auth.client_token')
+            if [ "$VAULT_TOKEN" == "null" ] || [ -z "$VAULT_TOKEN" ]; then
+             echo "Vault authentication failed"
+             echo "$RESPONSE"
+             exit 1
+            fi
+
+            echo "Vault authentication successful"
+            echo "::add-mask::$VAULT_TOKEN"
+            echo "VAULT_TOKEN=$VAULT_TOKEN" >> $GITHUB_ENV
+            echo "VAULT_ADDR=$VAULT_ADDR" >> $GITHUB_ENV
 
       - name: Validate Terraform files
         run: |
