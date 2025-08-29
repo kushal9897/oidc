@@ -72,8 +72,7 @@ resource "vault_jwt_auth_backend_role" "github_actions" {
   bound_audiences = ["vault", "https://github.com/${var.github_org}"]
 
   # Accept both push and PR subjects
-  bound_subject   = "repo:${var.github_org}/${var.github_repo}:*"
-
+  bound_subject   = "repo:${var.github_org}/${var.github_repo}:pull_request"
   # Constrain to your repo (and optionally limit events)
   bound_claims = {
     repository = "${var.github_org}/${var.github_repo}"
