@@ -171,7 +171,7 @@ jobs:
             echo "OIDC sub: $sub"
             echo "OIDC aud: $aud"
             case "$sub" in
-              repo:kushal9897/oidc:"*) ;;  # OK
+              repo:kushal9897/oidc:ref:refs/heads/* | repo:kushal9897/oidc:pull_request) ;;  # OK for branch or PR
               *)
                 echo "JWT 'sub' does not match bound_subject (repo:kushal9897/oidc:ref:refs/heads/*)"; 
                 echo "Ref/branch or repository may not match role constraints."
