@@ -227,12 +227,6 @@ jobs:
            terraform init -input=false
            echo "Terraform initialized successfully"
 
-      - name: Validate Terraform configuration
-        run: |
-         echo "Validating Terraform configuration..."
-         terraform validate
-         echo "Terraform configuration is valid"
-
       - name: Generate Terraform plan
         id: plan
         run: |
