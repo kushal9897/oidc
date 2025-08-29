@@ -207,27 +207,31 @@ jobs:
             echo "VAULT_ADDR=$VAULT_ADDR"
             echo "VAULT_NAMESPACE=$VAULT_NAMESPACE"
           } >> "$GITHUB_ENV"
-            - name: Validate Terraform files
-              run: |
-                echo "Checking Terraform formatting..."
-                if ! terraform fmt -check -diff; then
-                  echo " Terraform files are not properly formatted"
-                  echo "Run 'terraform fmt -recursive' to fix formatting issues"
-                  exit 1
-                fi
-                echo "Terraform formatting is correct"
 
-            - name: Initialize Terraform
-              run: |
-                echo "Initializing Terraform..."
-                terraform init -input=false
-                echo "Terraform initialized successfully"
 
-            - name: Validate Terraform configuration
-              run: |
-                echo "Validating Terraform configuration..."
-                terraform validate
-                echo "Terraform configuration is valid"
+
+      - name: Validate Terraform files
+        run: |
+         
+         echo "Checking Terraform formatting..."
+         if ! terraform fmt -check -diff; then
+           echo " Terraform files are not properly formatted"
+           echo "Run 'terraform fmt -recursive' to fix formatting issues"
+           exit 1
+          fi
+         echo "Terraform formatting is correct"
+
+      - name: Initialize Terraform
+        run: |
+           echo "Initializing Terraform..."
+           terraform init -input=false
+           echo "Terraform initialized successfully"
+
+      - name: Validate Terraform configuration
+        run: |
+         echo "Validating Terraform configuration..."
+         terraform validate
+         echo "Terraform configuration is valid"
 
       - name: Generate Terraform plan
         id: plan
