@@ -93,10 +93,6 @@ resource "aws_instance" "this" {
   vpc_security_group_ids      = [aws_security_group.instance.id]
   associate_public_ip_address = true
   
-  user_data = base64encode(templatefile("${path.module}/../../scripts/user-data.sh.tpl", {
-    environment = var.environment
-    name        = var.name
-  }))
 
   root_block_device {
     volume_size = var.root_volume_size
