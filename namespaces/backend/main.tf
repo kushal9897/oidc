@@ -4,7 +4,7 @@
 locals {
   environment = "backend"
   project     = "vault-terraform-demo"
-  
+
   common_tags = {
     Environment = local.environment
     Project     = local.project
@@ -17,23 +17,23 @@ locals {
 # Get AWS credentials from Vault
 module "vault_aws" {
   source = "../../modules/vault-aws-auth"
-  
+
   vault_backend_path = "aws"
   vault_role_name    = "terraform-role"
   credential_type    = "sts"
-  ttl                = 900  # 15 minutes
+  ttl                = 900 # 15 minutes
 }
 
 # Create EC2 instance and S3 bucket
 module "ec2_instance" {
   source = "../../modules/ec2"
-  
+
   name          = "${local.project}-${local.environment}"
   environment   = local.environment
   instance_type = var.instance_type
-  
-  root_volume_size = 50  # Larger for backend
-  
+
+  root_volume_size = 50 # Larger for backend
+
   tags = local.common_tags
 }
 

@@ -2,7 +2,7 @@
 
 terraform {
   required_version = ">= 1.6.0"
-  
+
   required_providers {
     vault = {
       source  = "hashicorp/vault"
@@ -19,12 +19,12 @@ provider "vault" {
 resource "vault_aws_secret_backend" "aws" {
   path   = "aws"
   region = var.aws_region
-  
+
   access_key = var.aws_access_key_id
   secret_key = var.aws_secret_access_key
-  
-  default_lease_ttl_seconds = 900   # 15 minutes
-  max_lease_ttl_seconds     = 1800  # 30 minutes
+
+  default_lease_ttl_seconds = 900  # 15 minutes
+  max_lease_ttl_seconds     = 1800 # 30 minutes
 }
 
 # Create Terraform role in Vault (works with root creds)
@@ -37,8 +37,8 @@ resource "vault_aws_secret_backend_role" "terraform" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "ec2:*",
           "s3:*",
           "iam:GetUser",
@@ -61,18 +61,18 @@ resource "vault_jwt_auth_backend" "github" {
 
 # Create role for GitHub Actions
 resource "vault_jwt_auth_backend_role" "github_actions" {
-  backend         = vault_jwt_auth_backend.github.path
-  role_name       = "github-actions"
+  backend   = vault_jwt_auth_backend.github.path
+  role_name = "github-actions"
 
-  token_policies  = ["terraform-policy"]
-  role_type       = "jwt"
-  user_claim      = "actor"
-  token_ttl       = 900
+  token_policies = ["terraform-policy"]
+  role_type      = "jwt"
+  user_claim     = "actor"
+  token_ttl      = 900
 
   bound_audiences = ["vault", "https://github.com/${var.github_org}"]
 
   # Accept both push and PR subjects
-  bound_subject   = "repo:${var.github_org}/${var.github_repo}:pull_request"
+  bound_subject = "repo:${var.github_org}/${var.github_repo}:pull_request"
   # Constrain to your repo (and optionally limit events)
   bound_claims = {
     repository = "${var.github_org}/${var.github_repo}"
@@ -82,7 +82,7 @@ resource "vault_jwt_auth_backend_role" "github_actions" {
 # Create policy for Terraform
 resource "vault_policy" "terraform" {
   name = "terraform-policy"
-  
+
   policy = <<EOT
 # Read AWS credentials
 path "aws/creds/terraform-role" {
