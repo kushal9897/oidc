@@ -59,6 +59,14 @@ resource "vault_jwt_auth_backend" "github" {
   bound_issuer       = "https://token.actions.githubusercontent.com"
 }
 
+# Enable JWT auth for GitLab CI
+resource "vault_jwt_auth_backend" "gitlab" {
+  description        = "JWT auth for GitLab CI"
+  path               = "gitlab-jwt"
+  oidc_discovery_url = "https://gitlab.com"
+  bound_issuer       = "https://gitlab.com"
+}
+
 # Create role for GitHub Actions
 resource "vault_jwt_auth_backend_role" "github_actions" {
   backend   = vault_jwt_auth_backend.github.path
@@ -76,6 +84,30 @@ resource "vault_jwt_auth_backend_role" "github_actions" {
   # Constrain to your repo (and optionally limit events)
   bound_claims = {
     repository = "${var.github_org}/${var.github_repo}"
+  }
+}
+
+# Create role for GitLab CI
+resource "vault_jwt_auth_backend_role" "gitlab_actions" {
+  backend   = vault_jwt_auth_backend.gitlab.path
+  role_name = "gitlab-actions"
+
+  token_policies = ["terraform-policy"]
+  role_type      = "jwt"
+  user_claim     = "user_login"
+  token_ttl      = 900
+
+  bound_audiences = ["vault"]
+
+  # Accept only merge requests targeting main branch
+  bound_subject = "project_path:${var.gitlab_project_path}:ref_type:branch:ref:*"
+  
+  # Constrain to your GitLab project and merge requests to main
+  bound_claims = {
+    project_path                = var.gitlab_project_path
+    ref_type                   = "branch"
+    pipeline_source            = "merge_request_event"
+    target_branch_name         = "main"
   }
 }
 

@@ -25,3 +25,9 @@ variable "github_repo" {
   description = "GitHub repository"
   type        = string
 }
+
+variable "gitlab_project_path" {
+  description = "GitLab project path (e.g., kushal9897/oidc)"
+  type        = string
+  default     = "kushal9897/oidc"
+}
