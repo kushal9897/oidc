@@ -1,0 +1,204 @@
+# GitLab CI Pipeline for Infrastructure Deployment
+# Equivalent to GitHub Actions workflow for Vault OIDC + Terraform
+
+stages:
+  - detect-changes
+  - plan
+  - summary
+
+variables:
+  VAULT_ADDR: $VAULT_ADDR
+  TF_VERSION: "1.6.0"
+  VAULT_ROLE: "gitlab-actions"  # Update role name for GitLab
+  VAULT_NAMESPACE: "admin"
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_CACHE_KEY: "${CI_COMMIT_REF_SLUG}"
+
+# Only run on merge requests targeting main branch with changes to namespaces/
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "namespaces/**/*"
+      when: always
+    - when: never
+
+# Detect changed namespaces
+detect-changes:
+  stage: detect-changes
+  image: ubuntu:latest
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git jq
+  script:
+    - |
+      set -euo pipefail
+      
+      # Get merge request source and target branches
+      BASE="${CI_MERGE_REQUEST_TARGET_BRANCH_SHA}"
+      HEAD="${CI_COMMIT_SHA}"
+      echo "BASE=$BASE"
+      echo "HEAD=$HEAD"
+      
+      # Ensure we have both commits locally
+      echo "Fetching base and head commits..."
+      git fetch --no-tags --prune --depth=1 origin "$BASE" || {
+        echo "Failed to fetch base commit, falling back to merge-base"
+        git fetch --no-tags --prune origin main
+        BASE=$(git merge-base origin/main HEAD)
+        echo "Using merge-base: $BASE"
+      }
+      
+      # Get changed files under namespaces/ directory
+      echo "Detecting changed files..."
+      CHANGED_FILES=$(git diff --name-only "$BASE"..."$HEAD" -- 'namespaces/' 2>/dev/null || true)
+      
+      if [[ -z "$CHANGED_FILES" ]]; then
+        echo "No changes detected under namespaces/"
+        echo "namespaces=[]" > namespaces.json
+        echo "has-changes=false" > has-changes.txt
+        exit 0
+      fi
+      
+      echo "Changed files under namespaces/:"
+      echo "$CHANGED_FILES"
+      
+      # Extract namespace directories (2nd path segment) and deduplicate
+      # Only include valid namespaces (must have at least one .tf file)
+      VALID_NAMESPACES=()
+      while IFS= read -r file; do
+        if [[ "$file" =~ ^namespaces/([^/]+)/ ]]; then
+          namespace="${BASH_REMATCH[1]}"
+          # Check if this namespace has .tf files
+          if ls "namespaces/$namespace"/*.tf >/dev/null 2>&1; then
+            VALID_NAMESPACES+=("$namespace")
+          else
+            echo "Warning: $namespace doesn't contain .tf files, skipping"
+          fi
+        fi
+      done <<< "$CHANGED_FILES"
+      
+      # Remove duplicates and sort
+      if (( ${#VALID_NAMESPACES[@]} == 0 )); then
+        echo "No valid namespace changes detected"
+        echo "namespaces=[]" > namespaces.json
+        echo "has-changes=false" > has-changes.txt
+        exit 0
+      fi
+      
+      # Create unique sorted array
+      mapfile -t UNIQUE_NS < <(printf '%s\n' "${VALID_NAMESPACES[@]}" | sort -u)
+      
+      # Generate JSON array
+      JSON=$(printf '%s\n' "${UNIQUE_NS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+      echo "$JSON" > namespaces.json
+      echo "has-changes=true" > has-changes.txt
+      echo "Detected valid namespaces: $JSON"
+  artifacts:
+    paths:
+      - namespaces.json
+      - has-changes.txt
+    expire_in: 1 hour
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "namespaces/**/*"
+
+# Dynamic job generation for each namespace
+.plan-template: &plan-template
+  stage: plan
+  image: ubuntu:latest
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl jq unzip
+    # Install Terraform
+    - |
+      curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o terraform.zip
+      unzip terraform.zip
+      chmod +x terraform
+      mv terraform /usr/local/bin/
+      terraform version
+  cache:
+    key: terraform-${CI_COMMIT_REF_SLUG}-${NAMESPACE}
+    paths:
+      - .terraform/
+      - .terraform.lock.hcl
+  script:
+    - cd namespaces/${NAMESPACE}
+    
+    # Get Vault Token via GitLab OIDC
+    - |
+      set -euo pipefail
+      
+      # Get GitLab OIDC token
+      echo "Requesting GitLab OIDC token"
+      JWT_TOKEN="${CI_JOB_JWT_V2}"
+      
+      if [[ -z "$JWT_TOKEN" ]]; then
+        echo "Failed to obtain OIDC token"
+        exit 1
+      fi
+      
+      # Optional: Verify claims match your role before calling Vault
+      IFS='.' read -r _ payload _ <<< "$JWT_TOKEN" || true
+      if decoded=$(echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null); then
+        sub=$(echo "$decoded" | jq -r '.sub // empty')
+        aud=$(echo "$decoded" | jq -cr '.aud // empty')
+        echo "OIDC sub: $sub"
+        echo "OIDC aud: $aud"
+      else
+        echo "Warning: could not decode JWT claims for local validation (continuing)."
+      fi
+      
+      : "${VAULT_ADDR:?VAULT_ADDR is required}"
+      : "${VAULT_ROLE:?VAULT_ROLE is required}"
+      VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
+      
+      echo "Authenticating with Vault (role=${VAULT_ROLE}, ns=${VAULT_NAMESPACE})"
+      RESPONSE="$(curl -sSL --request POST \
+        --header "X-Vault-Namespace: ${VAULT_NAMESPACE}" \
+        --header "Content-Type: application/json" \
+        --data "{\"jwt\": \"${JWT_TOKEN}\", \"role\": \"${VAULT_ROLE}\"}" \
+        "${VAULT_ADDR}/v1/auth/gitlab-jwt/login")"
+      
+      VAULT_TOKEN="$(echo "$RESPONSE" | jq -r '.auth.client_token')"
+      if [[ -z "$VAULT_TOKEN" || "$VAULT_TOKEN" == "null" ]]; then
+        echo "Vault authentication failed"
+        echo "$RESPONSE"
+        exit 1
+      fi
+      
+      echo "Vault authentication successful"
+      export VAULT_TOKEN="$VAULT_TOKEN"
+      export VAULT_ADDR="$VAULT_ADDR"
+      export VAULT_NAMESPACE="$VAULT_NAMESPACE"
+    
+    # Validate Terraform files
+    - |
+      echo "Checking Terraform formatting..."
+      if ! terraform fmt -check -diff; then
+        echo "Terraform files are not properly formatted"
+        echo "Run 'terraform fmt -recursive' to fix formatting issues"
+        exit 1
+      fi
+      echo "Terraform formatting is correct"
+    
+    # Initialize Terraform
+    - |
+      echo "Initializing Terraform..."
+      terraform init -input=false
+      echo "Terraform initialized successfully"
+    
+    # Validate Terraform configuration
+    - |
+      echo "Validating Terraform configuration..."
+      terraform validate
+      echo "Terraform configuration is valid"
+    
+    # Generate Terraform plan
+    - |
+      echo "Generating Terraform plan..."
+      terraform plan 
+
+    # Apply Terraform changes
+    - |
+      echo "Applying Terraform changes..."
+      terraform apply -auto-approve

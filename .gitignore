@@ -33,3 +33,5 @@ terraform-provider-*
 # Ignore .DS_Store, Thumbs.db, and other OS cruft
 .DS_Store
 Thumbs.db
+#keys
+vault-data/

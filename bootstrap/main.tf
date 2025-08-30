@@ -2,7 +2,7 @@
 
 terraform {
   required_version = ">= 1.6.0"
-  
+
   required_providers {
     vault = {
       source  = "hashicorp/vault"
@@ -19,12 +19,12 @@ provider "vault" {
 resource "vault_aws_secret_backend" "aws" {
   path   = "aws"
   region = var.aws_region
-  
+
   access_key = var.aws_access_key_id
   secret_key = var.aws_secret_access_key
-  
-  default_lease_ttl_seconds = 900   # 15 minutes
-  max_lease_ttl_seconds     = 1800  # 30 minutes
+
+  default_lease_ttl_seconds = 900  # 15 minutes
+  max_lease_ttl_seconds     = 1800 # 30 minutes
 }
 
 # Create Terraform role in Vault (works with root creds)
@@ -37,8 +37,8 @@ resource "vault_aws_secret_backend_role" "terraform" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "ec2:*",
           "s3:*",
           "iam:GetUser",
@@ -59,34 +59,69 @@ resource "vault_jwt_auth_backend" "github" {
   bound_issuer       = "https://token.actions.githubusercontent.com"
 }
 
+# Enable JWT auth for GitLab CI
+resource "vault_jwt_auth_backend" "gitlab" {
+  description        = "JWT auth for GitLab CI"
+  path               = "gitlab-jwt"
+  oidc_discovery_url = "https://gitlab.com"
+  bound_issuer       = "https://gitlab.com"
+}
+
 # Create role for GitHub Actions
 resource "vault_jwt_auth_backend_role" "github_actions" {
-  backend         = vault_jwt_auth_backend.github.path
-  role_name       = "github-actions"
+  backend   = vault_jwt_auth_backend.github.path
+  role_name = "github-actions"
 
-  token_policies  = ["terraform-policy"]
-  role_type       = "jwt"
-  user_claim      = "actor"
-  token_ttl       = 900
+  token_policies = ["terraform-policy"]
+  role_type      = "jwt"
+  user_claim     = "actor"
+  token_ttl      = 900
 
   bound_audiences = ["vault", "https://github.com/${var.github_org}"]
 
   # Accept both push and PR subjects
-  bound_subject   = "repo:${var.github_org}/${var.github_repo}:*"
-
+  bound_subject = "repo:${var.github_org}/${var.github_repo}:pull_request"
   # Constrain to your repo (and optionally limit events)
   bound_claims = {
     repository = "${var.github_org}/${var.github_repo}"
   }
 }
 
+# Create role for GitLab CI
+resource "vault_jwt_auth_backend_role" "gitlab_actions" {
+  backend   = vault_jwt_auth_backend.gitlab.path
+  role_name = "gitlab-actions"
+
+  token_policies = ["terraform-policy"]
+  role_type      = "jwt"
+  user_claim     = "user_login"
+  token_ttl      = 900
+
+  bound_audiences = ["vault"]
+
+  # Accept only merge requests targeting main branch
+  bound_subject = "project_path:${var.gitlab_project_path}:ref_type:branch:ref:*"
+  
+  # Constrain to your GitLab project and merge requests to main
+  bound_claims = {
+    project_path                = var.gitlab_project_path
+    ref_type                   = "branch"
+    pipeline_source            = "merge_request_event"
+    target_branch_name         = "main"
+  }
+}
+
 # Create policy for Terraform
 resource "vault_policy" "terraform" {
   name = "terraform-policy"
-  
+
   policy = <<EOT
 # Read AWS credentials
 path "aws/creds/terraform-role" {
+  capabilities = ["read"]
+}
+
+path "aws/sts/terraform-role" {
   capabilities = ["read"]
 }
 
@@ -97,6 +132,20 @@ path "auth/token/renew-self" {
 
 path "auth/token/lookup-self" {
   capabilities = ["read"]
+}
+
+# Allow creating child tokens for Vault provider operations
+path "auth/token/create" {
+  capabilities = ["create", "update"]
+}
+
+# Allow token renewal and revocation
+path "auth/token/renew" {
+  capabilities = ["update"]
+}
+
+path "auth/token/revoke" {
+  capabilities = ["update"]
 }
 EOT
 }

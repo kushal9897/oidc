@@ -1,6 +1,6 @@
 terraform {
   required_version = ">= 1.6.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -26,7 +26,7 @@ provider "aws" {
   access_key = module.vault_aws.access_key
   secret_key = module.vault_aws.secret_key
   token      = module.vault_aws.security_token
-  
+
   default_tags {
     tags = {
       Environment = "backend"

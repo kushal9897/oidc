@@ -171,7 +171,7 @@ jobs:
             echo "OIDC sub: $sub"
             echo "OIDC aud: $aud"
             case "$sub" in
-              repo:kushal9897/oidc:ref:refs/heads/*) ;;  # OK
+              repo:kushal9897/oidc:ref:refs/heads/* | repo:kushal9897/oidc:pull_request) ;;  # OK for branch or PR
               *)
                 echo "JWT 'sub' does not match bound_subject (repo:kushal9897/oidc:ref:refs/heads/*)"; 
                 echo "Ref/branch or repository may not match role constraints."
@@ -207,145 +207,37 @@ jobs:
             echo "VAULT_ADDR=$VAULT_ADDR"
             echo "VAULT_NAMESPACE=$VAULT_NAMESPACE"
           } >> "$GITHUB_ENV"
-            - name: Validate Terraform files
-              run: |
-                echo "Checking Terraform formatting..."
-                if ! terraform fmt -check -diff; then
-                  echo " Terraform files are not properly formatted"
-                  echo "Run 'terraform fmt -recursive' to fix formatting issues"
-                  exit 1
-                fi
-                echo "Terraform formatting is correct"
 
-            - name: Initialize Terraform
-              run: |
-                echo "Initializing Terraform..."
-                terraform init -input=false
-                echo "Terraform initialized successfully"
 
-            - name: Validate Terraform configuration
-              run: |
-                echo "Validating Terraform configuration..."
-                terraform validate
-                echo "Terraform configuration is valid"
+
+      - name: Validate Terraform files
+        run: |
+         
+         echo "Checking Terraform formatting..."
+         if ! terraform fmt -check -diff; then
+           echo " Terraform files are not properly formatted"
+           echo "Run 'terraform fmt -recursive' to fix formatting issues"
+           exit 1
+          fi
+         echo "Terraform formatting is correct"
+
+      - name: Initialize Terraform
+        run: |
+           echo "Initializing Terraform..."
+           terraform init -input=false
+           echo "Terraform initialized successfully"
+
+      - name: Validate Terraform configuration
+        run: |
+          echo "Validating Terraform configuration..."
+          terraform validate
+          echo "Terraform configuration is valid"           
 
       - name: Generate Terraform plan
         id: plan
         run: |
           echo "Generating Terraform plan..."
-          terraform plan -input=false -no-color -detailed-exitcode > plan.out 2>&1 || EXIT_CODE=$?
-          
-          # Handle Terraform plan exit codes:
-          # 0 = No changes
-          # 1 = Error
-          # 2 = Changes present
-          case ${EXIT_CODE:-0} in
-            0)
-              echo "plan-result=no-changes" >> "$GITHUB_OUTPUT"
-              echo " No infrastructure changes needed"
-              ;;
-            1)
-              echo "plan-result=error" >> "$GITHUB_OUTPUT"
-              echo "Terraform plan failed"
-              cat plan.out
-              exit 1
-              ;;
-            2)
-              echo "plan-result=changes" >> "$GITHUB_OUTPUT"
-              echo "Infrastructure changes detected"
-              ;;
-          esac
-
-      - name: Comment PR with plan results
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const namespace = '${{ matrix.namespace }}';
-            const planResult = '${{ steps.plan.outputs.plan-result }}';
-            
-            let comment = `## Terraform Plan Results for \`${namespace}\`\n\n`;
-            
-            if (planResult === 'no-changes') {
-
-              comment += ' No infrastructure changes needed\n';
-            } else if (planResult === 'error') {
-              comment += ' Terraform plan failed\n';
-            } else if (planResult === 'changes') {
-              comment += ' Infrastructure changes detected\n\n';
-              
-              try {
-                const plan = fs.readFileSync('namespaces/' + namespace + '/plan.out', 'utf8');
-                comment += '<details>\n<summary>Click to view plan details</summary>\n\n```hcl\n';
-                comment += plan.slice(0, 20000); // Limit size to avoid GitHub comment limits
-                if (plan.length > 20000) {
-                  comment += '\n... (truncated)\n';
-                }
-                comment += '\n```\n</details>\n';
-              } catch (error) {
-                comment += 'Could not read plan output file.\n';
-              }
-            }
-            
-            // Find existing comment for this namespace
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.body.includes(`Terraform Plan Results for \`${namespace}\``)
-            );
-            
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: comment
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: comment
-              });
-            }
-
-  summary:
-    name: Plan Summary
-    needs: [detect-changes, plan]
-    if: always() && needs.detect-changes.outputs.has-changes == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Generate summary
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const namespaces = ${{ needs.detect-changes.outputs.namespaces }};
-            const planJobs = Object.values(context.payload.workflow_run?.jobs || {})
-              .filter(job => job.name.startsWith('Plan ('));
-            
-            let summary = '##  Terraform Plan Summary\n\n';
-            summary += `**Namespaces processed:** ${namespaces.length}\n\n`;
-            
-            if (namespaces.length === 0) {
-              summary += ' No namespace changes detected\n';
-            } else {
-              summary += '| Namespace | Status |\n';
-              summary += '|-----------|--------|\n';
-              
-              for (const namespace of namespaces) {
-                // This is a simplified status check - in a real scenario you'd check job results
-                summary += `| \`${namespace}\` | Processing |\n`;
-              }
-            }
-            
-            console.log(summary);
+          terraform plan
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
