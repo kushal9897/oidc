@@ -1,204 +1,203 @@
-# GitLab CI Pipeline for Infrastructure Deployment
-# Equivalent to GitHub Actions workflow for Vault OIDC + Terraform
-
-stages:
-  - detect-changes
-  - plan
-  - summary
-
 variables:
   VAULT_ADDR: $VAULT_ADDR
-  TF_VERSION: "1.6.0"
-  VAULT_ROLE: "gitlab-actions"  # Update role name for GitLab
+  VAULT_ROLE: "gitlab-actions"
   VAULT_NAMESPACE: "admin"
-  TF_ROOT: ${CI_PROJECT_DIR}
-  TF_CACHE_KEY: "${CI_COMMIT_REF_SLUG}"
+  VAULT_AUTH_PATH: "auth/gitlab-ci"
 
-# Only run on merge requests targeting main branch with changes to namespaces/
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - "namespaces/**/*"
       when: always
     - when: never
 
-# Detect changed namespaces
+stages:
+  - detect
+  - plan
+  - apply
+
 detect-changes:
-  stage: detect-changes
-  image: ubuntu:latest
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq git jq
+  stage: detect
+  image:
+    name: alpine/git:latest
+    entrypoint: [""]   
+  script:
+    - mkdir -p output
+    - HAS_CHANGES=false; CHANGED_NS_LIST=","
+    - git fetch --no-tags --prune origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - 'TF_CHANGES_BACKEND=$(git diff --name-only "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"...HEAD -- "namespaces/backend" | grep "\.tf$" || true)'
+    - 'TF_CHANGES_QA=$(git diff --name-only "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"...HEAD -- "namespaces/qa"      | grep "\.tf$" || true)'
+    - if [ -n "$TF_CHANGES_BACKEND" ]; then echo "Namespace 'backend' has Terraform changes."; HAS_CHANGES=true; CHANGED_NS_LIST="${CHANGED_NS_LIST}backend,"; else echo "No Terraform changes in 'backend'."; fi
+    - if [ -n "$TF_CHANGES_QA" ]; then echo "Namespace 'qa' has Terraform changes."; HAS_CHANGES=true; CHANGED_NS_LIST="${CHANGED_NS_LIST}qa,"; else echo "No Terraform changes in 'qa'."; fi
+    - echo "HAS_CHANGES=$HAS_CHANGES" > output/changes.env
+    - echo "CHANGED_NS_LIST=$CHANGED_NS_LIST" >> output/changes.env
+    - cat output/changes.env
+  artifacts:
+    reports:
+      dotenv: output/changes.env
+    expire_in: 1 hour
+
+plan-backend:
+  stage: plan
+  image:
+    name: hashicorp/terraform:1.6.0
+    entrypoint: [""]   
+  needs: ["detect-changes"]
+  variables:
+    TF_IN_AUTOMATION: "true"
   script:
     - |
-      set -euo pipefail
-      
-      # Get merge request source and target branches
-      BASE="${CI_MERGE_REQUEST_TARGET_BRANCH_SHA}"
-      HEAD="${CI_COMMIT_SHA}"
-      echo "BASE=$BASE"
-      echo "HEAD=$HEAD"
-      
-      # Ensure we have both commits locally
-      echo "Fetching base and head commits..."
-      git fetch --no-tags --prune --depth=1 origin "$BASE" || {
-        echo "Failed to fetch base commit, falling back to merge-base"
-        git fetch --no-tags --prune origin main
-        BASE=$(git merge-base origin/main HEAD)
-        echo "Using merge-base: $BASE"
-      }
-      
-      # Get changed files under namespaces/ directory
-      echo "Detecting changed files..."
-      CHANGED_FILES=$(git diff --name-only "$BASE"..."$HEAD" -- 'namespaces/' 2>/dev/null || true)
-      
-      if [[ -z "$CHANGED_FILES" ]]; then
-        echo "No changes detected under namespaces/"
-        echo "namespaces=[]" > namespaces.json
-        echo "has-changes=false" > has-changes.txt
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",backend,"; then
+    - |
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",backend,"; then
+        echo "No changes in 'backend'; skipping plan."
+        echo "No changes." > backend-plan.txt
+        : > backend.tfplan
         exit 0
       fi
-      
-      echo "Changed files under namespaces/:"
-      echo "$CHANGED_FILES"
-      
-      # Extract namespace directories (2nd path segment) and deduplicate
-      # Only include valid namespaces (must have at least one .tf file)
-      VALID_NAMESPACES=()
-      while IFS= read -r file; do
-        if [[ "$file" =~ ^namespaces/([^/]+)/ ]]; then
-          namespace="${BASH_REMATCH[1]}"
-          # Check if this namespace has .tf files
-          if ls "namespaces/$namespace"/*.tf >/dev/null 2>&1; then
-            VALID_NAMESPACES+=("$namespace")
-          else
-            echo "Warning: $namespace doesn't contain .tf files, skipping"
-          fi
-        fi
-      done <<< "$CHANGED_FILES"
-      
-      # Remove duplicates and sort
-      if (( ${#VALID_NAMESPACES[@]} == 0 )); then
-        echo "No valid namespace changes detected"
-        echo "namespaces=[]" > namespaces.json
-        echo "has-changes=false" > has-changes.txt
-        exit 0
-      fi
-      
-      # Create unique sorted array
-      mapfile -t UNIQUE_NS < <(printf '%s\n' "${VALID_NAMESPACES[@]}" | sort -u)
-      
-      # Generate JSON array
-      JSON=$(printf '%s\n' "${UNIQUE_NS[@]}" | jq -R -s -c 'split("\n")[:-1]')
-      echo "$JSON" > namespaces.json
-      echo "has-changes=true" > has-changes.txt
-      echo "Detected valid namespaces: $JSON"
+
+    - apk add --no-cache jq curl
+    - |
+      : "${VAULT_ADDR:?Set VAULT_ADDR (e.g., https://vault.example.com)}"
+      : "${VAULT_ROLE:?Set VAULT_ROLE (e.g., gitlab-ci)}"
+      VAULT_AUTH_PATH="${VAULT_AUTH_PATH:-auth/gitlab-ci}"
+      echo "Logging in to Vault at ${VAULT_AUTH_PATH} as role ${VAULT_ROLE}..."
+      VAULT_LOGIN_RESP=$(curl -sS \
+        -H "Content-Type: application/json" \
+        ${VAULT_NAMESPACE:+-H "X-Vault-Namespace: $VAULT_NAMESPACE"} \
+        --data '{"jwt":"'"$CI_JOB_JWT"'","role":"'"$VAULT_ROLE"'"}' \
+        "${VAULT_ADDR}/v1/${VAULT_AUTH_PATH}/login")
+      export VAULT_TOKEN=$(echo "$VAULT_LOGIN_RESP" | jq -r '.auth.client_token')
+      test -n "$VAULT_TOKEN" && [ "$VAULT_TOKEN" != "null" ] || { echo "Vault auth failed: $VAULT_LOGIN_RESP"; exit 1; }
+  
+    - cd namespaces/backend
+    - terraform fmt -check -diff
+    - terraform init -input=false
+    - terraform validate
+    - terraform plan -input=false -out=tfplan
+    - terraform show -no-color tfplan > plan.txt
+    
+    - mv tfplan ../../backend.tfplan
+    - mv plan.txt ../../backend-plan.txt
   artifacts:
     paths:
-      - namespaces.json
-      - has-changes.txt
+      - backend.tfplan
+      - backend-plan.txt
     expire_in: 1 hour
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - "namespaces/**/*"
 
-# Dynamic job generation for each namespace
-.plan-template: &plan-template
+plan-qa:
   stage: plan
-  image: ubuntu:latest
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq curl jq unzip
-    # Install Terraform
-    - |
-      curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o terraform.zip
-      unzip terraform.zip
-      chmod +x terraform
-      mv terraform /usr/local/bin/
-      terraform version
-  cache:
-    key: terraform-${CI_COMMIT_REF_SLUG}-${NAMESPACE}
-    paths:
-      - .terraform/
-      - .terraform.lock.hcl
+  image:
+    name: hashicorp/terraform:1.6.0
+    entrypoint: [""]   
+  needs: ["detect-changes"]
+  variables:
+    TF_IN_AUTOMATION: "true"
   script:
-    - cd namespaces/${NAMESPACE}
-    
-    # Get Vault Token via GitLab OIDC
     - |
-      set -euo pipefail
-      
-      # Get GitLab OIDC token
-      echo "Requesting GitLab OIDC token"
-      JWT_TOKEN="${CI_JOB_JWT_V2}"
-      
-      if [[ -z "$JWT_TOKEN" ]]; then
-        echo "Failed to obtain OIDC token"
-        exit 1
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",qa,"; then
+    - |
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",qa,"; then
+        echo "No changes in 'qa'; skipping plan."
+        echo "No changes." > qa-plan.txt
+        : > qa.tfplan
+        exit 0
       fi
-      
-      # Optional: Verify claims match your role before calling Vault
-      IFS='.' read -r _ payload _ <<< "$JWT_TOKEN" || true
-      if decoded=$(echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null); then
-        sub=$(echo "$decoded" | jq -r '.sub // empty')
-        aud=$(echo "$decoded" | jq -cr '.aud // empty')
-        echo "OIDC sub: $sub"
-        echo "OIDC aud: $aud"
-      else
-        echo "Warning: could not decode JWT claims for local validation (continuing)."
-      fi
-      
-      : "${VAULT_ADDR:?VAULT_ADDR is required}"
-      : "${VAULT_ROLE:?VAULT_ROLE is required}"
-      VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
-      
-      echo "Authenticating with Vault (role=${VAULT_ROLE}, ns=${VAULT_NAMESPACE})"
-      RESPONSE="$(curl -sSL --request POST \
-        --header "X-Vault-Namespace: ${VAULT_NAMESPACE}" \
-        --header "Content-Type: application/json" \
-        --data "{\"jwt\": \"${JWT_TOKEN}\", \"role\": \"${VAULT_ROLE}\"}" \
-        "${VAULT_ADDR}/v1/auth/gitlab-jwt/login")"
-      
-      VAULT_TOKEN="$(echo "$RESPONSE" | jq -r '.auth.client_token')"
-      if [[ -z "$VAULT_TOKEN" || "$VAULT_TOKEN" == "null" ]]; then
-        echo "Vault authentication failed"
-        echo "$RESPONSE"
-        exit 1
-      fi
-      
-      echo "Vault authentication successful"
-      export VAULT_TOKEN="$VAULT_TOKEN"
-      export VAULT_ADDR="$VAULT_ADDR"
-      export VAULT_NAMESPACE="$VAULT_NAMESPACE"
-    
-    # Validate Terraform files
+    - apk add --no-cache jq curl
     - |
-      echo "Checking Terraform formatting..."
-      if ! terraform fmt -check -diff; then
-        echo "Terraform files are not properly formatted"
-        echo "Run 'terraform fmt -recursive' to fix formatting issues"
-        exit 1
-      fi
-      echo "Terraform formatting is correct"
-    
-    # Initialize Terraform
-    - |
-      echo "Initializing Terraform..."
-      terraform init -input=false
-      echo "Terraform initialized successfully"
-    
-    # Validate Terraform configuration
-    - |
-      echo "Validating Terraform configuration..."
-      terraform validate
-      echo "Terraform configuration is valid"
-    
-    # Generate Terraform plan
-    - |
-      echo "Generating Terraform plan..."
-      terraform plan 
+      : "${VAULT_ADDR:?Set VAULT_ADDR (e.g., https://vault.example.com)}"
+      : "${VAULT_ROLE:?Set VAULT_ROLE (e.g., gitlab-ci)}"
+      VAULT_AUTH_PATH="${VAULT_AUTH_PATH:-auth/gitlab-ci}"
+      echo "Logging in to Vault at ${VAULT_AUTH_PATH} as role ${VAULT_ROLE}..."
+      VAULT_LOGIN_RESP=$(curl -sS \
+        -H "Content-Type: application/json" \
+        ${VAULT_NAMESPACE:+-H "X-Vault-Namespace: $VAULT_NAMESPACE"} \
+        --data '{"jwt":"'"$CI_JOB_JWT"'","role":"'"$VAULT_ROLE"'"}' \
+        "${VAULT_ADDR}/v1/${VAULT_AUTH_PATH}/login")
+      export VAULT_TOKEN=$(echo "$VAULT_LOGIN_RESP" | jq -r '.auth.client_token')
+      test -n "$VAULT_TOKEN" && [ "$VAULT_TOKEN" != "null" ] || { echo "Vault auth failed: $VAULT_LOGIN_RESP"; exit 1; }
+  
+    - cd namespaces/qa
+    - terraform fmt -check -diff
+    - terraform init -input=false
+    - terraform validate
+    - terraform plan -input=false -out=tfplan
+    - terraform show -no-color tfplan > plan.txt
+   
+    - mv tfplan ../../qa.tfplan
+    - mv plan.txt ../../qa-plan.txt
+  artifacts:
+    paths:
+      - qa.tfplan
+      - qa-plan.txt
+    expire_in: 1 hour
 
-    # Apply Terraform changes
+apply-backend:
+  stage: apply
+  image:
+    name: hashicorp/terraform:1.6.0
+    entrypoint: [""]
+  needs:
+    - job: detect-changes     
+      artifacts: true
+    - job: plan-backend       
+      artifacts: true
+  variables:
+    TF_IN_AUTOMATION: "true"
+  script:
     - |
-      echo "Applying Terraform changes..."
-      terraform apply -auto-approve
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",backend,"; then
+        echo "No changes in 'backend'; nothing to apply."
+        exit 0
+      fi
+    - apk add --no-cache jq curl
+   
+    - |
+      : "${VAULT_ADDR:?Set VAULT_ADDR (e.g., https://vault.example.com)}"
+      : "${VAULT_ROLE:?Set VAULT_ROLE (e.g., gitlab-ci)}"
+      VAULT_AUTH_PATH="${VAULT_AUTH_PATH:-auth/gitlab-ci}"
+      echo "Logging in to Vault at ${VAULT_AUTH_PATH} as role ${VAULT_ROLE}..."
+      VAULT_LOGIN_RESP=$(curl -sS \
+        -H "Content-Type: application/json" \
+        ${VAULT_NAMESPACE:+-H "X-Vault-Namespace: $VAULT_NAMESPACE"} \
+        --data '{"jwt":"'"$CI_JOB_JWT"'","role":"'"$VAULT_ROLE"'"}' \
+        "${VAULT_ADDR}/v1/${VAULT_AUTH_PATH}/login")
+      export VAULT_TOKEN=$(echo "$VAULT_LOGIN_RESP" | jq -r '.auth.client_token')
+      test -n "$VAULT_TOKEN" && [ "$VAULT_TOKEN" != "null" ] || { echo "Vault auth failed: $VAULT_LOGIN_RESP"; exit 1; }
+    - terraform apply -input=false -auto-approve backend.tfplan
+  when: manual
+  allow_failure: false
+
+apply-qa:
+  stage: apply
+  image:
+    name: hashicorp/terraform:1.6.0
+    entrypoint: [""]
+  needs:
+    - job: detect-changes     
+      artifacts: true
+    - job: plan-qa            
+      artifacts: true
+  variables:
+    TF_IN_AUTOMATION: "true"
+  script:
+    - |
+      if ! echo "$CHANGED_NS_LIST" | grep -q ",qa,"; then
+        echo "No changes in 'qa'; nothing to apply."
+        exit 0
+      fi
+    - apk add --no-cache jq curl
+    - |
+      : "${VAULT_ADDR:?Set VAULT_ADDR (e.g., https://vault.example.com)}"
+      : "${VAULT_ROLE:?Set VAULT_ROLE (e.g., gitlab-ci)}"
+      VAULT_AUTH_PATH="${VAULT_AUTH_PATH:-auth/gitlab-ci}"
+      echo "Logging in to Vault at ${VAULT_AUTH_PATH} as role ${VAULT_ROLE}..."
+      VAULT_LOGIN_RESP=$(curl -sS \
+        -H "Content-Type: application/json" \
+        ${VAULT_NAMESPACE:+-H "X-Vault-Namespace: $VAULT_NAMESPACE"} \
+        --data '{"jwt":"'"$CI_JOB_JWT"'","role":"'"$VAULT_ROLE"'"}' \
+        "${VAULT_ADDR}/v1/${VAULT_AUTH_PATH}/login")
+      export VAULT_TOKEN=$(echo "$VAULT_LOGIN_RESP" | jq -r '.auth.client_token')
+      test -n "$VAULT_TOKEN" && [ "$VAULT_TOKEN" != "null" ] || { echo "Vault auth failed: $VAULT_LOGIN_RESP"; exit 1; }
+    - terraform apply -input=false -auto-approve qa.tfplan
+  when: manual
+  allow_failure: false
