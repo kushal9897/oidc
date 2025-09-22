@@ -1,6 +1,6 @@
 # OIDC Vault-Terraform Integration
 
-A secure, automated infrastructure management system that leverages HashiCorp Vault for OIDC-based authentication and dynamic AWS credential management with Terraform automation across multiple environments.
+A secure, automated infrastructure management system that leverages HashiCorp Vault for OIDC-based authentication and dynamic AWS credential management with Terraform automation across multiple environments, supporting both GitHub Actions and GitLab CI/CD pipelines.
 
 ## 🏗️ Architecture Overview
 
@@ -16,7 +16,7 @@ This project implements a secure DevOps pipeline that:
 - **Secure Authentication**: OIDC integration with GitHub Actions and GitLab CI
 - **Dynamic Credentials**: Short-lived AWS credentials generated on-demand
 - **Multi-Environment Support**: Separate namespaces for dev, qa, and production
-- **Automated CI/CD**: GitLab pipelines with intelligent change detection
+- **Automated CI/CD**: GitHub Actions and GitLab pipelines with intelligent change detection
 - **Infrastructure as Code**: Terraform modules for EC2, S3, and Vault configuration
 - **Security Best Practices**: Token-based authentication, least privilege access
 
@@ -77,14 +77,27 @@ terraform apply
 
 ### 3. Configure Environment Variables
 
-Set the following variables in your CI/CD environment:
+Set the following variables in your CI/CD environments:
+
+**For GitHub Actions:**
+- `VAULT_ADDR` - Vault server URL
+- `VAULT_NAMESPACE` - Vault namespace (admin)
+- AWS credentials for initial bootstrap
+
+**For GitLab CI/CD:**
 - `VAULT_ADDR` - Vault server URL
 - `VAULT_NAMESPACE` - Vault namespace (admin)
 - AWS credentials for initial bootstrap
 
 ### 4. Deploy to Environments
 
-The GitLab CI/CD pipeline automatically:
+**GitHub Actions Pipeline:**
+- Triggers on pull requests and pushes
+- Authenticates with Vault using OIDC JWT tokens
+- Retrieves dynamic AWS credentials
+- Applies Terraform configurations
+
+**GitLab CI/CD Pipeline:**
 - Detects changes in namespace directories
 - Authenticates with Vault using OIDC
 - Retrieves dynamic AWS credentials
@@ -107,10 +120,16 @@ The GitLab CI/CD pipeline automatically:
 - **Token Management**: Self-renewal and child token creation
 - **Audit Logging**: All access attempts logged and monitored
 
-## 🚦 CI/CD Pipeline
+## 🚦 CI/CD Pipelines
 
-The GitLab CI pipeline includes:
+### GitHub Actions Pipeline
+1. **Trigger Events**: Pull requests and pushes to main branch
+2. **OIDC Authentication**: JWT-based Vault authentication
+3. **Terraform Validation**: Format checking and configuration validation
+4. **Infrastructure Deployment**: Automated apply with approval workflows
+5. **Multi-Environment Support**: Matrix builds for dev, qa, and prod
 
+### GitLab CI/CD Pipeline
 1. **Change Detection**: Only processes modified namespaces
 2. **Vault Authentication**: OIDC-based secure login
 3. **Terraform Validation**: Format checking and configuration validation
@@ -126,11 +145,19 @@ The GitLab CI pipeline includes:
 
 ## 🤝 Contributing
 
+**For GitHub:**
+1. Fork the repository
+2. Create a feature branch
+3. Make changes in the appropriate namespace directory
+4. Submit a pull request to `main` branch
+5. GitHub Actions will automatically validate and deploy changes
+
+**For GitLab:**
 1. Fork the repository
 2. Create a feature branch
 3. Make changes in the appropriate namespace directory
 4. Submit a merge request to `main` branch
-5. Pipeline will automatically validate and deploy changes
+5. GitLab CI/CD will automatically validate and deploy changes
 
 ## 📝 Best Practices
 
@@ -153,8 +180,8 @@ The GitLab CI pipeline includes:
    - Verify Vault policy allows required operations
 
 3. **Pipeline Skipped**
-   - Check if changes exist in the target namespace directory
-   - Verify merge request targets the `main` branch
+   - **GitHub**: Verify pull request targets the `main` branch and contains relevant changes
+   - **GitLab**: Check if changes exist in the target namespace directory and merge request targets `main`
 
 ## 📞 Support
 
