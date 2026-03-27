@@ -1,1 +1,22 @@
+Gap Contractor Onboarding – Access Guide
 
+Please follow the steps below to complete your initial access setup.
+
+1. Set up PingID MFA
+A PingID registration email will be sent to your Trace3 email account. Please open the email and complete the MFA registration process using the instructions provided in the attachment.
+MFA link: https://newportal.gap.com/mfa
+
+2. Install the Windows App
+Download and install the Windows App (Remote Desktop) on your laptop from the Microsoft Store. This will be used to access the Gap virtual desktop environment.
+
+3. Access the Gap AVD environment
+Open the AVD web client using the link below and sign in with your Gap account credentials. Complete the MFA verification when prompted. After login, select the assigned AVD workspace or desktop.
+AVD link: https://client.wvd.microsoft.com/arm/webclient/index.html
+
+4. Access Outlook
+Open Outlook using the link below and sign in with your Gap account credentials. Complete MFA if prompted.
+Outlook link: https://outlook.office.com/
+
+Notes
+	•	Please use your Gap account credentials for all sign-ins.
+	•	MFA setup must be completed before accessing AVD and Outlook.
